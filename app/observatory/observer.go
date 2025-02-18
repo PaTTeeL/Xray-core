@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/common/errors"
 	v2net "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/signal/done"
@@ -18,7 +18,9 @@ import (
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/extension"
 	"github.com/xtls/xray-core/features/outbound"
+	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/transport/internet/tagged"
+	"google.golang.org/protobuf/proto"
 )
 
 type Observer struct {
@@ -30,7 +32,8 @@ type Observer struct {
 
 	finished *done.Instance
 
-	ohm outbound.Manager
+	ohm        outbound.Manager
+	dispatcher routing.Dispatcher
 }
 
 func (o *Observer) GetObservation(ctx context.Context) (proto.Message, error) {
@@ -60,7 +63,7 @@ func (o *Observer) background() {
 	for !o.finished.Done() {
 		hs, ok := o.ohm.(outbound.HandlerSelector)
 		if !ok {
-			newError("outbound.Manager is not a HandlerSelector").WriteToLog()
+			errors.LogInfo(o.ctx, "outbound.Manager is not a HandlerSelector")
 			return
 		}
 
@@ -127,18 +130,18 @@ func (o *Observer) probe(outbound string) ProbeResult {
 				// MUST use Xray's built in context system
 				dest, err := v2net.ParseDestination(network + ":" + addr)
 				if err != nil {
-					return newError("cannot understand address").Base(err)
+					return errors.New("cannot understand address").Base(err)
 				}
 				trackedCtx := session.TrackedConnectionError(o.ctx, errorCollectorForRequest)
-				conn, err := tagged.Dialer(trackedCtx, dest, outbound)
+				conn, err := tagged.Dialer(trackedCtx, o.dispatcher, dest, outbound)
 				if err != nil {
-					return newError("cannot dial remote address ", dest).Base(err)
+					return errors.New("cannot dial remote address ", dest).Base(err)
 				}
 				connection = conn
 				return nil
 			})
 			if taskErr != nil {
-				return nil, newError("cannot finish connection").Base(taskErr)
+				return nil, errors.New("cannot finish connection").Base(taskErr)
 			}
 			return connection, nil
 		},
@@ -161,7 +164,7 @@ func (o *Observer) probe(outbound string) ProbeResult {
 		}
 		response, err := httpClient.Get(probeURL)
 		if err != nil {
-			return newError("outbound failed to relay connection").Base(err)
+			return errors.New("outbound failed to relay connection").Base(err)
 		}
 		if response.Body != nil {
 			response.Body.Close()
@@ -171,15 +174,11 @@ func (o *Observer) probe(outbound string) ProbeResult {
 		return nil
 	})
 	if err != nil {
-		fullerr := newError("underlying connection failed").Base(errorCollectorForRequest.UnderlyingError())
-		fullerr = newError("with outbound handler report").Base(fullerr)
-		fullerr = newError("GET request failed:", err).Base(fullerr)
-		fullerr = newError("the outbound ", outbound, " is dead:").Base(fullerr)
-		fullerr = fullerr.AtInfo()
-		fullerr.WriteToLog()
-		return ProbeResult{Alive: false, LastErrorReason: fullerr.Error()}
+		var errorMessage = "the outbound " + outbound + " is dead: GET request failed:" + err.Error() + "with outbound handler report underlying connection failed"
+		errors.LogInfoInner(o.ctx, errorCollectorForRequest.UnderlyingError(), errorMessage)
+		return ProbeResult{Alive: false, LastErrorReason: errorMessage}
 	}
-	newError("the outbound ", outbound, " is alive:", GETTime.Seconds()).AtInfo().WriteToLog()
+	errors.LogInfo(o.ctx, "the outbound ", outbound, " is alive:", GETTime.Seconds())
 	return ProbeResult{Alive: true, Delay: GETTime.Milliseconds()}
 }
 
@@ -218,16 +217,19 @@ func (o *Observer) findStatusLocationLockHolderOnly(outbound string) int {
 
 func New(ctx context.Context, config *Config) (*Observer, error) {
 	var outboundManager outbound.Manager
-	err := core.RequireFeatures(ctx, func(om outbound.Manager) {
+	var dispatcher routing.Dispatcher
+	err := core.RequireFeatures(ctx, func(om outbound.Manager, rd routing.Dispatcher) {
 		outboundManager = om
+		dispatcher = rd
 	})
 	if err != nil {
-		return nil, newError("Cannot get depended features").Base(err)
+		return nil, errors.New("Cannot get depended features").Base(err)
 	}
 	return &Observer{
-		config: config,
-		ctx:    ctx,
-		ohm:    outboundManager,
+		config:     config,
+		ctx:        ctx,
+		ohm:        outboundManager,
+		dispatcher: dispatcher,
 	}, nil
 }
 

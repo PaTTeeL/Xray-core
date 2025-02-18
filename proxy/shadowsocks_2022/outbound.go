@@ -2,8 +2,6 @@ package shadowsocks_2022
 
 import (
 	"context"
-	"io"
-	"runtime"
 	"time"
 
 	shadowsocks "github.com/sagernet/sing-shadowsocks"
@@ -15,8 +13,10 @@ import (
 	"github.com/sagernet/sing/common/uot"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
+	"github.com/xtls/xray-core/common/singbridge"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet"
 )
@@ -45,15 +45,15 @@ func NewClient(ctx context.Context, config *ClientConfig) (*Outbound, error) {
 	}
 	if C.Contains(shadowaead_2022.List, config.Method) {
 		if config.Key == "" {
-			return nil, newError("missing psk")
+			return nil, errors.New("missing psk")
 		}
 		method, err := shadowaead_2022.NewWithPassword(config.Method, config.Key, nil)
 		if err != nil {
-			return nil, newError("create method").Base(err)
+			return nil, errors.New("create method").Base(err)
 		}
 		o.method = method
 	} else {
-		return nil, newError("unknown method ", config.Method)
+		return nil, errors.New("unknown method ", config.Method)
 	}
 	if config.UdpOverTcp {
 		o.uotClient = &uot.Client{Version: uint8(config.UdpOverTcpVersion)}
@@ -68,14 +68,17 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 		inboundConn = inbound.Conn
 	}
 
-	outbound := session.OutboundFromContext(ctx)
-	if outbound == nil || !outbound.Target.IsValid() {
-		return newError("target not specified")
+	outbounds := session.OutboundsFromContext(ctx)
+	ob := outbounds[len(outbounds)-1]
+	if !ob.Target.IsValid() {
+		return errors.New("target not specified")
 	}
-	destination := outbound.Target
+	ob.Name = "shadowsocks-2022"
+	ob.CanSpliceCopy = 3
+	destination := ob.Target
 	network := destination.Network
 
-	newError("tunneling request to ", destination, " via ", o.server.NetAddr()).WriteToLog(session.ExportIDToError(ctx))
+	errors.LogInfo(ctx, "tunneling request to ", destination, " via ", o.server.NetAddr())
 
 	serverDestination := o.server
 	if o.uotClient != nil {
@@ -85,7 +88,7 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 	}
 	connection, err := dialer.Dial(ctx, serverDestination)
 	if err != nil {
-		return newError("failed to connect to server").Base(err)
+		return errors.New("failed to connect to server").Base(err)
 	}
 
 	if session.TimeoutOnlyFromContext(ctx) {
@@ -93,52 +96,40 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 	}
 
 	if network == net.Network_TCP {
-		serverConn := o.method.DialEarlyConn(connection, toSocksaddr(destination))
+		serverConn := o.method.DialEarlyConn(connection, singbridge.ToSocksaddr(destination))
 		var handshake bool
 		if timeoutReader, isTimeoutReader := link.Reader.(buf.TimeoutReader); isTimeoutReader {
 			mb, err := timeoutReader.ReadMultiBufferTimeout(time.Millisecond * 100)
 			if err != nil && err != buf.ErrNotTimeoutReader && err != buf.ErrReadTimeout {
-				return newError("read payload").Base(err)
+				return errors.New("read payload").Base(err)
 			}
-			_payload := B.StackNew()
-			payload := C.Dup(_payload)
-			defer payload.Release()
+			payload := B.New()
 			for {
-				payload.FullReset()
+				payload.Reset()
 				nb, n := buf.SplitBytes(mb, payload.FreeBytes())
 				if n > 0 {
 					payload.Truncate(n)
 					_, err = serverConn.Write(payload.Bytes())
 					if err != nil {
-						return newError("write payload").Base(err)
+						payload.Release()
+						return errors.New("write payload").Base(err)
 					}
 					handshake = true
 				}
 				if nb.IsEmpty() {
 					break
-				} else {
-					mb = nb
 				}
+				mb = nb
 			}
-			runtime.KeepAlive(_payload)
+			payload.Release()
 		}
 		if !handshake {
 			_, err = serverConn.Write(nil)
 			if err != nil {
-				return newError("client handshake").Base(err)
+				return errors.New("client handshake").Base(err)
 			}
 		}
-		conn := &pipeConnWrapper{
-			W:    link.Writer,
-			Conn: inboundConn,
-		}
-		if ir, ok := link.Reader.(io.Reader); ok {
-			conn.R = ir
-		} else {
-			conn.R = &buf.BufferedReader{Reader: link.Reader}
-		}
-
-		return returnError(bufio.CopyConn(ctx, conn, serverConn))
+		return singbridge.CopyConn(ctx, inboundConn, link, serverConn)
 	} else {
 		var packetConn N.PacketConn
 		if pc, isPacketConn := inboundConn.(N.PacketConn); isPacketConn {
@@ -146,7 +137,7 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 		} else if nc, isNetPacket := inboundConn.(net.PacketConn); isNetPacket {
 			packetConn = bufio.NewPacketConn(nc)
 		} else {
-			packetConn = &packetConnWrapper{
+			packetConn = &singbridge.PacketConnWrapper{
 				Reader: link.Reader,
 				Writer: link.Writer,
 				Conn:   inboundConn,
@@ -155,14 +146,14 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 		}
 
 		if o.uotClient != nil {
-			uConn, err := o.uotClient.DialEarlyConn(o.method.DialEarlyConn(connection, uot.RequestDestination(o.uotClient.Version)), false, toSocksaddr(destination))
+			uConn, err := o.uotClient.DialEarlyConn(o.method.DialEarlyConn(connection, uot.RequestDestination(o.uotClient.Version)), false, singbridge.ToSocksaddr(destination))
 			if err != nil {
 				return err
 			}
-			return returnError(bufio.CopyPacketConn(ctx, packetConn, uConn))
+			return singbridge.ReturnError(bufio.CopyPacketConn(ctx, packetConn, uConn))
 		} else {
 			serverConn := o.method.DialPacketConn(connection)
-			return returnError(bufio.CopyPacketConn(ctx, packetConn, serverConn))
+			return singbridge.ReturnError(bufio.CopyPacketConn(ctx, packetConn, serverConn))
 		}
 	}
 }

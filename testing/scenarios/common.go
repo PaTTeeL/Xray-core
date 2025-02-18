@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/common"
@@ -25,6 +24,7 @@ import (
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/common/units"
 	core "github.com/xtls/xray-core/core"
+	"google.golang.org/protobuf/proto"
 )
 
 func xor(b []byte) []byte {
@@ -96,6 +96,7 @@ func InitializeServerConfig(config *core.Config) (*exec.Cmd, error) {
 
 var (
 	testBinaryPath    string
+	testBinaryCleanFn func()
 	testBinaryPathGen sync.Once
 )
 
@@ -108,6 +109,7 @@ func genTestBinaryPath() {
 				return err
 			}
 			tempDir = dir
+			testBinaryCleanFn = func() { os.RemoveAll(dir) }
 			return nil
 		}))
 		file := filepath.Join(tempDir, "xray.test")

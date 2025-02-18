@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/features/dns"
@@ -13,13 +14,19 @@ import (
 
 // LocalNameServer is an wrapper over local DNS feature.
 type LocalNameServer struct {
-	client *localdns.Client
+	client        *localdns.Client
+	queryStrategy QueryStrategy
 }
 
 const errEmptyResponse = "No address associated with hostname"
 
 // QueryIP implements Server.
-func (s *LocalNameServer) QueryIP(_ context.Context, domain string, _ net.IP, option dns.IPOption, _ bool) (ips []net.IP, err error) {
+func (s *LocalNameServer) QueryIP(ctx context.Context, domain string, _ net.IP, option dns.IPOption, _ bool) (ips []net.IP, err error) {
+	option = ResolveIpOptionOverride(s.queryStrategy, option)
+	if !option.IPv4Enable && !option.IPv6Enable {
+		return nil, dns.ErrEmptyResponse
+	}
+
 	start := time.Now()
 	ips, err = s.client.LookupIP(domain, option)
 
@@ -28,7 +35,7 @@ func (s *LocalNameServer) QueryIP(_ context.Context, domain string, _ net.IP, op
 	}
 
 	if len(ips) > 0 {
-		newError("Localhost got answer: ", domain, " -> ", ips).AtInfo().WriteToLog()
+		errors.LogInfo(ctx, "Localhost got answer: ", domain, " -> ", ips)
 		log.Record(&log.DNSLog{Server: s.Name(), Domain: domain, Result: ips, Status: log.DNSQueried, Elapsed: time.Since(start), Error: err})
 	}
 
@@ -41,14 +48,15 @@ func (s *LocalNameServer) Name() string {
 }
 
 // NewLocalNameServer creates localdns server object for directly lookup in system DNS.
-func NewLocalNameServer() *LocalNameServer {
-	newError("DNS: created localhost client").AtInfo().WriteToLog()
+func NewLocalNameServer(queryStrategy QueryStrategy) *LocalNameServer {
+	errors.LogInfo(context.Background(), "DNS: created localhost client")
 	return &LocalNameServer{
-		client: localdns.New(),
+		queryStrategy: queryStrategy,
+		client:        localdns.New(),
 	}
 }
 
 // NewLocalDNSClient creates localdns client object for directly lookup in system DNS.
 func NewLocalDNSClient() *Client {
-	return &Client{server: NewLocalNameServer()}
+	return &Client{server: NewLocalNameServer(QueryStrategy_USE_IP)}
 }

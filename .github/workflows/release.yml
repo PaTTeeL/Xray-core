@@ -5,81 +5,25 @@ on:
   release:
     types: [published]
   push:
-    branches:
-      - main
-    paths:
-      - "**/*.go"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/*.yml"
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - "**/*.go"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/*.yml"
+
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Restore Cache
-        uses: actions/cache/restore@v3
-        with:
-          path: resources
-          key: xray-geodat-
-
-      - name: Update Geodat
-        id: update
-        uses: nick-fields/retry@v2
-        with:
-          timeout_minutes: 60
-          retry_wait_seconds: 60
-          max_attempts: 60
-          command: |
-            [ -d 'resources' ] || mkdir resources
-            LIST=('geoip geoip geoip' 'domain-list-community dlc geosite')
-            for i in "${LIST[@]}"
-            do
-              INFO=($(echo $i | awk 'BEGIN{FS=" ";OFS=" "} {print $1,$2,$3}'))
-              FILE_NAME="${INFO[2]}.dat"
-              echo -e "Verifying HASH key..."
-              HASH="$(curl -sL "https://raw.githubusercontent.com/v2fly/${INFO[0]}/release/${INFO[1]}.dat.sha256sum" | awk -F ' ' '{print $1}')"
-              if [ -s "./resources/${FILE_NAME}" ] && [ "$(sha256sum "./resources/${FILE_NAME}" | awk -F ' ' '{print $1}')" == "${HASH}" ]; then
-                  continue
-              else
-                  echo -e "Downloading https://raw.githubusercontent.com/v2fly/${INFO[0]}/release/${INFO[1]}.dat..."
-                  curl -L "https://raw.githubusercontent.com/v2fly/${INFO[0]}/release/${INFO[1]}.dat" -o ./resources/${FILE_NAME}
-                  echo -e "Verifying HASH key..."
-                  [ "$(sha256sum "./resources/${FILE_NAME}" | awk -F ' ' '{print $1}')" == "${HASH}" ] || { echo -e "The HASH key of ${FILE_NAME} does not match cloud one."; exit 1; }
-                  echo "unhit=true" >> $GITHUB_OUTPUT
-              fi
-            done
-
-      - name: Save Cache
-        uses: actions/cache/save@v3
-        if: ${{ steps.update.outputs.unhit }}
-        with:
-          path: resources
-          key: xray-geodat-${{ github.sha }}-${{ github.run_number }}
-
   build:
-    needs: prepare
     permissions:
       contents: write
     strategy:
       matrix:
         # Include amd64 on all platforms.
-        goos: [windows, freebsd, openbsd, linux, dragonfly, darwin]
+        goos: [windows, freebsd, openbsd, linux, darwin]
         goarch: [amd64, 386]
+        patch-assetname: [""]
         exclude:
-          # Exclude i386 on darwin and dragonfly.
-          - goarch: 386
-            goos: dragonfly
+          # Exclude i386 on darwin
           - goarch: 386
             goos: darwin
         include:
-          # BEIGIN MacOS ARM64
+          # BEGIN MacOS ARM64
           - goos: darwin
             goarch: arm64
           # END MacOS ARM64
@@ -105,12 +49,14 @@ jobs:
             goarch: arm
             goarm: 7
           # BEGIN Other architectures
-          # BEGIN riscv64 & ARM64
+          # BEGIN riscv64 & ARM64 & LOONG64
           - goos: linux
             goarch: arm64
           - goos: linux
             goarch: riscv64
-          # END riscv64 & ARM64
+          - goos: linux
+            goarch: loong64
+          # END riscv64 & ARM64 & LOONG64
           # BEGIN MIPS
           - goos: linux
             goarch: mips64
@@ -156,56 +102,46 @@ jobs:
       CGO_ENABLED: 0
     steps:
       - name: Checkout codebase
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Show workflow information 
+      - name: Show workflow information
         run: |
-          export _NAME=$(jq ".[\"$GOOS-$GOARCH$GOARM$GOMIPS\"].friendlyName" -r < .github/build/friendly-filenames.json)
+          _NAME=${{ matrix.patch-assetname }}
+          [ -n "$_NAME" ] || _NAME=$(jq ".[\"$GOOS-$GOARCH$GOARM$GOMIPS\"].friendlyName" -r < .github/build/friendly-filenames.json)
           echo "GOOS: $GOOS, GOARCH: $GOARCH, GOARM: $GOARM, GOMIPS: $GOMIPS, RELEASE_NAME: $_NAME"
           echo "ASSET_NAME=$_NAME" >> $GITHUB_ENV
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.20'
+          go-version-file: go.mod
           check-latest: true
 
       - name: Get project dependencies
         run: go mod download
       
-      - name: Replace Custom to Commit ID
-        if: github.event_name != 'release'
-        run: |
-          ID=$(git rev-parse --short ${{ github.sha }})
-          if [ "${{ github.event_name }}" == 'pull_request' ]
-          then
-            ID=$(git rev-parse --short ${{ github.event.pull_request.head.sha }})
-          fi
-          sed -i '/build/ s/Custom/'$ID'/' ./core/core.go
- 
       - name: Build Xray
         run: |
           mkdir -p build_assets
-          go build -v -o build_assets/xray -trimpath -ldflags "-s -w -buildid=" ./main
+          COMMID=$(git describe --always --dirty)
+          if [[ ${GOOS} == 'windows' ]]; then
+            echo 'Building Xray for Windows...'
+            go build -o build_assets/xray.exe -trimpath -buildvcs=false -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
+            echo 'CreateObject("Wscript.Shell").Run "xray.exe -config config.json",0' > build_assets/xray_no_window.vbs
+            echo 'Start-Process -FilePath ".\xray.exe" -ArgumentList "-config .\config.json" -WindowStyle Hidden' > build_assets/xray_no_window.ps1
+            # The line below is for without running conhost.exe version. Commented for not being used. Provided for reference.
+            # go build -o build_assets/wxray.exe -trimpath -buildvcs=false -ldflags="-H windowsgui -X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
+          else
+            echo 'Building Xray...'
+            go build -o build_assets/xray -trimpath -buildvcs=false -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
+            if [[ ${GOARCH} == 'mips' || ${GOARCH} == 'mipsle' ]]; then
+              echo 'Building soft-float Xray for MIPS/MIPSLE 32-bit...'
+              GOMIPS=softfloat go build -o build_assets/xray_softfloat -trimpath -buildvcs=false -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
+            fi
+          fi
 
-      - name: Build background Xray on Windows 
-        if: matrix.goos == 'windows'
-        run: |
-          go build -v -o build_assets/wxray.exe -trimpath -ldflags "-s -w -H windowsgui -buildid=" ./main
-    
-      - name: Build Mips softfloat Xray
-        if: matrix.goarch == 'mips' || matrix.goarch == 'mipsle'
-        run: |
-          GOMIPS=softfloat go build -v -o build_assets/xray_softfloat -trimpath -ldflags "-s -w -buildid=" ./main
-
-      - name: Rename Windows Xray
-        if: matrix.goos == 'windows'
-        run: |
-          cd ./build_assets || exit 1
-          mv xray xray.exe
-
-      - name: Restore Cache
-        uses: actions/cache/restore@v3
+      - name: Restore Geodat Cache
+        uses: actions/cache/restore@v4
         with:
           path: resources
           key: xray-geodat-
@@ -217,6 +153,7 @@ jobs:
           cp ${GITHUB_WORKSPACE}/LICENSE ./build_assets/LICENSE
 
       - name: Create ZIP archive
+        if: github.event_name == 'release'
         shell: bash
         run: |
           pushd build_assets || exit 1
@@ -235,7 +172,7 @@ jobs:
           mv build_assets Xray-${{ env.ASSET_NAME }}
 
       - name: Upload files to Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: Xray-${{ env.ASSET_NAME }}
           path: |

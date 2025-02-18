@@ -1,12 +1,13 @@
 package conf
 
 import (
-	"github.com/golang/protobuf/proto"
 	"github.com/xtls/xray-core/transport/internet/grpc"
+	"google.golang.org/protobuf/proto"
 )
 
 type GRPCConfig struct {
-	ServiceName         string `json:"serviceName" `
+	Authority           string `json:"authority"`
+	ServiceName         string `json:"serviceName"`
 	MultiMode           bool   `json:"multiMode"`
 	IdleTimeout         int32  `json:"idle_timeout"`
 	HealthCheckTimeout  int32  `json:"health_check_timeout"`
@@ -28,6 +29,7 @@ func (g *GRPCConfig) Build() (proto.Message, error) {
 	}
 
 	return &grpc.Config{
+		Authority:           g.Authority,
 		ServiceName:         g.ServiceName,
 		MultiMode:           g.MultiMode,
 		IdleTimeout:         g.IdleTimeout,

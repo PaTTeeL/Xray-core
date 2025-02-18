@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"go/build"
@@ -22,7 +23,7 @@ var directory = flag.String("pwd", "", "Working directory of Xray vprotogen.")
 func envFile() (string, error) {
 	if file := os.Getenv("GOENV"); file != "" {
 		if file == "off" {
-			return "", fmt.Errorf("GOENV=off")
+			return "", errors.New("GOENV=off")
 		}
 		return file, nil
 	}
@@ -31,7 +32,7 @@ func envFile() (string, error) {
 		return "", err
 	}
 	if dir == "" {
-		return "", fmt.Errorf("missing user-config dir")
+		return "", errors.New("missing user-config dir")
 	}
 	return filepath.Join(dir, "go", "env"), nil
 }
@@ -44,7 +45,7 @@ func GetRuntimeEnv(key string) (string, error) {
 		return "", err
 	}
 	if file == "" {
-		return "", fmt.Errorf("missing runtime env file")
+		return "", errors.New("missing runtime env file")
 	}
 	var data []byte
 	var runtimeEnv string
@@ -101,14 +102,14 @@ Download %s v%s or later from https://github.com/protocolbuffers/protobuf/releas
 func getProjectProtocVersion(url string) (string, error) {
 	resp, err := http.Get(url)
 	if err != nil {
-		return "", fmt.Errorf("can not get the version of protobuf used in xray project")
+		return "", errors.New("can not get the version of protobuf used in xray project")
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("can not read from body")
+		return "", errors.New("can not read from body")
 	}
-	versionRegexp := regexp.MustCompile(`\/\/\s*protoc\s*v(\d+\.\d+\.\d+)`)
+	versionRegexp := regexp.MustCompile(`\/\/\s*protoc\s*v\d+\.(\d+\.\d+)`)
 	matched := versionRegexp.FindStringSubmatch(string(body))
 	return matched[1], nil
 }
@@ -120,7 +121,7 @@ func getInstalledProtocVersion(protocPath string) (string, error) {
 	if cmdErr != nil {
 		return "", cmdErr
 	}
-	versionRegexp := regexp.MustCompile(`protoc\s*(\d+\.\d+\.\d+)`)
+	versionRegexp := regexp.MustCompile(`protoc\s*(\d+\.\d+)`)
 	matched := versionRegexp.FindStringSubmatch(string(output))
 	return matched[1], nil
 }
@@ -174,11 +175,14 @@ func main() {
 		suffix = ".exe"
 	}
 
-	targetedVersion, err := getProjectProtocVersion("https://raw.githubusercontent.com/xtls/xray-core/HEAD/core/config.pb.go")
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
+	/*
+		targetedVersion, err := getProjectProtocVersion("https://raw.githubusercontent.com/XTLS/Xray-core/HEAD/core/config.pb.go")
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+	*/
+	targetedVersion := ""
 
 	protoc, err := whichProtoc(suffix, targetedVersion)
 	if err != nil {
